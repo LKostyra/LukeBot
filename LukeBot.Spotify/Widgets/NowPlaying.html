@@ -1,59 +1,192 @@
 <!DOCTYPE html>
-<div id="artist" class="artist">
-    Artist
-</div>
-<div id="title" class="title">
+
+<style>
+    body {
+        background-color: rgba(0, 0, 0, 0);
+        margin: 0px auto;
+        overflow: hidden;
+        white-space: nowrap;
+        color: #ffffff;
+        font: 48px Arial;
+        -webkit-text-stroke-width: 1px;
+        -webkit-text-stroke-color: black;
+        height: 100%;
+    }
+
+    #title {
+        margin-bottom: 0px;
+    }
+
+    #title::-webkit-scrollbar {
+        display: none;
+    }
+
+    #artists {
+        font: 36px Arial;
+    }
+
+    #debug {
+        font: 16px Arial;
+        white-space: normal;
+        -webkit-text-stroke-width: 0px;
+        color: #ffffff;
+        flex-grow: 1;
+    }
+</style>
+
+<div id="title">
     Title
 </div>
+<div id="artists">
+    Artists
+</div>
 <br />
-<div id="debug" class="debug">
+<div>
     Debug logs:<br />
+</div>
+<div id="debug" class="debug">
 </div>
 
 <script>
-const dbg = document.getElementById("debug");
-function printDebug(text) {
-    if (dbg) {
-        dbg.innerHTML += text + "<br />";
-    }
-}
-
-const metadata = document.getElementsByTagName('meta');
-function getMeta(name) {
-    for (let i = 0; i < metadata.length; ++i) {
-        if (metadata[i].getAttribute('name') === name) {
-            return metadata[i].getAttribute('content');
+    const dbg = document.getElementById("debug");
+    function printDebug(text) {
+        if (dbg) {
+            dbg.innerHTML += text + "<br />";
         }
     }
-    return '';
-}
 
-const port = getMeta('widgetport');
-const artist = document.getElementById('artist');
-const title = document.getElementById('title');
-
-printDebug(port);
-
-let socket = new WebSocket("ws://localhost:" + port + "/");
-socket.onopen = function(e) {
-    printDebug(`Connected to server at port ${port}`);
-    socket.send("Hello server!");
-    socket.send("Hi server! I am sending a very long message to make sure that long message receiving and payload extension code is working perfectly fine (I hope)");
-}
-
-socket.onclose = function(event) {
-    if (event.wasClean) {
-        printDebug(`Connection closed cleanly`);
-    } else {
-        printDebug(`Connection died`);
+    const metadata = document.getElementsByTagName('meta');
+    function getMeta(name) {
+        for (let i = 0; i < metadata.length; ++i) {
+            if (metadata[i].getAttribute('name') === name) {
+                return metadata[i].getAttribute('content');
+            }
+        }
+        return '';
     }
-}
 
-socket.onerror = function(error) {
-    printDebug(`Error: ${error.message}`);
-}
+    const port = getMeta('widgetport');
+    const artists = document.getElementById('artists');
+    const title = document.getElementById('title');
 
-socket.onmessage = function(event) {
-    printDebug(`Msg: ${event.data}`);
-}
+    const STATE_UNLOADED = 0;
+    const STATE_STOPPED = 1;
+    const STATE_PLAYING = 2;
+    let playbackState = STATE_UNLOADED;
+    let currentTrack = null;
+    let trackChanged = false;
+    function AnimState(element) {
+        this.element = element;
+        this.width = element.scrollWidth;
+        this.inProgress = false;
+        this.offset = 0.0; // px
+        this.speed = 20.0; // px/s
+        this.wait = 2.0; // seconds
+        this.start = undefined;
+        this.lastTime = undefined;
+
+        this.animStep = function (currentTime) {
+            if (this.start === undefined) {
+                this.start = currentTime;
+                this.lastTime = currentTime;
+            }
+
+            let deltaTime = (currentTime - this.lastTime) / 1000.0; // ms -> s
+            let totalTime = (currentTime - this.start) / 1000.0; // ms -> s
+
+            // only start scrolling when we waited a bit
+            if (totalTime > this.wait) {
+                this.offset -= deltaTime * this.speed;
+                if (this.offset < (-1 * this.element.scrollWidth)) {
+                    // scroll finished, restart animation
+                    this.offset = 0.0;
+                    this.start = currentTime;
+                }
+                this.element.style.transform = 'translateX(' + this.offset + 'px)';
+            }
+
+            this.lastTime = currentTime;
+            if (this.inProgress == true) {
+                window.requestAnimationFrame(this.animStep.bind(this));
+            }
+        }
+
+        this.checkIfAnimNeeded = function () {
+            if (this.inProgress) {
+                if (this.element.scrollWidth <= window.innerWidth) {
+                    // shut down current animation
+                    printDebug("smaller, stop anim");
+                    this.inProgress = false;
+                    this.offset = 0.0;
+                    this.element.style.transform = 'translateX(0px)';
+                }
+                return;
+            } else {
+                if (this.element.scrollWidth > window.innerWidth) {
+                    printDebug(`larger, start anim`);
+                    this.inProgress = true;
+                    window.requestAnimationFrame(this.animStep.bind(this));
+                }
+            }
+        }
+    }
+    let artistsAnimState = new AnimState(artists);
+    let titleAnimState = new AnimState(title);
+
+    function update() {
+        if (playbackState == STATE_PLAYING) {
+            artists.innerHTML = currentTrack.Artists;
+            title.innerHTML = currentTrack.Title;
+        } else {
+            artists.innerHTML = "";
+            title.innerHTML = "";
+        }
+
+        if (trackChanged) {
+            artistsAnimState.checkIfAnimNeeded();
+            titleAnimState.checkIfAnimNeeded();
+        }
+    }
+
+
+    printDebug(port);
+    let socket = new WebSocket("ws://localhost:" + port + "/");
+    socket.onopen = function (e) {
+        printDebug(`Connected to server at port ${port}`);
+
+        let k = Object.keys(window.obsstudio);
+        printDebug(`OBS keys: ${k}`);
+    }
+
+    socket.onclose = function (event) {
+        if (event.wasClean) {
+            printDebug(`Connection closed cleanly`);
+        } else {
+            printDebug(`Connection died`);
+        }
+    }
+
+    socket.onerror = function (error) {
+        printDebug(`Error: ${error.message}`);
+    }
+
+    socket.onmessage = function (event) {
+        try {
+            let obj = JSON.parse(event.data);
+
+            if (obj.Type != null) {
+                if (obj.Type == "NowPlayingTrackChanged") {
+                    currentTrack = obj;
+                    trackChanged = true;
+                } else if (obj.Type == "NowPlayingStateUpdate") {
+                    playbackState = obj.State;
+                    update();
+                }
+            } else {
+                printDebug(`Received unknown obj: ${obj}`);
+            }
+        } catch (error) {
+            printDebug(`Error: ${error}`);
+        }
+    }
 </script>
